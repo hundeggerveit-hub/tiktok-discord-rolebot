@@ -1,8 +1,9 @@
-// TikTok → Discord Rollenbot mit 7-Tage-Rollen-Timeout + Retroaktiv
+// TikTok → Discord Rollenbot mit 7-Tage-Rollen-Timeout + Retroaktiv + Webserver für Render
 
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const express = require('express');
 const { Client, GatewayIntentBits, Partials, Events, PermissionsBitField } = require('discord.js');
 const { WebcastPushConnection } = require('tiktok-live-connector');
 
@@ -20,8 +21,8 @@ if (!DISCORD_TOKEN || !GUILD_ID || !ROLE_ID || !TIKTOK_USERNAME) {
 
 // ====== Persistente Speicherung ======
 const DATA_DIR = path.join(__dirname, 'data');
-const LINKS_FILE = path.join(DATA_DIR, 'links.json'); // TikTokName -> DiscordUserId
-const ROLE_TIMERS_FILE = path.join(DATA_DIR, 'role_timers.json'); // TikTokName -> timestamp
+const LINKS_FILE = path.join(DATA_DIR, 'links.json'); 
+const ROLE_TIMERS_FILE = path.join(DATA_DIR, 'role_timers.json'); 
 
 function ensureStorage() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
@@ -31,43 +32,32 @@ function ensureStorage() {
 
 function loadLinks() {
   ensureStorage();
-  try {
-    return JSON.parse(fs.readFileSync(LINKS_FILE, 'utf8'));
-  } catch (e) {
-    console.error('⚠️ Konnte links.json nicht lesen. Setze leeres Mapping.', e);
-    return {};
-  }
+  try { return JSON.parse(fs.readFileSync(LINKS_FILE, 'utf8')); } 
+  catch { return {}; }
 }
-function saveLinks(obj) {
-  ensureStorage();
-  fs.writeFileSync(LINKS_FILE, JSON.stringify(obj, null, 2));
-}
+function saveLinks(obj) { ensureStorage(); fs.writeFileSync(LINKS_FILE, JSON.stringify(obj, null, 2)); }
 
 function loadRoleTimers() {
   ensureStorage();
-  try {
-    return JSON.parse(fs.readFileSync(ROLE_TIMERS_FILE, 'utf8'));
-  } catch (e) {
-    console.error('⚠️ Konnte role_timers.json nicht lesen. Setze leeres Mapping.', e);
-    return {};
-  }
+  try { return JSON.parse(fs.readFileSync(ROLE_TIMERS_FILE, 'utf8')); } 
+  catch { return {}; }
 }
-function saveRoleTimers(obj) {
-  ensureStorage();
-  fs.writeFileSync(ROLE_TIMERS_FILE, JSON.stringify(obj, null, 2));
-}
+function saveRoleTimers(obj) { ensureStorage(); fs.writeFileSync(ROLE_TIMERS_FILE, JSON.stringify(obj, null, 2)); }
 
 let links = loadLinks();
 let roleTimers = loadRoleTimers();
 
+// ====== Webserver (für Render Free Worker/Web Service) ======
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get("/", (req, res) => res.send("Bot läuft!"));
+
+app.listen(port, () => console.log(`🌐 Webserver läuft auf Port ${port}`));
+
 // ====== Discord Client ======
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.GuildMember, Partials.User]
 });
 
@@ -77,21 +67,21 @@ client.once(Events.ClientReady, async () => {
     const guild = await client.guilds.fetch(GUILD_ID);
     const role = await guild.roles.fetch(ROLE_ID);
     if (!role) console.warn('⚠️ Rolle nicht gefunden. Prüfe DISCORD_ROLE_ID.');
-    console.log(`🛠️  Zielrolle: ${role ? role.name : ROLE_ID}`);
+    console.log(`🛠️ Zielrolle: ${role ? role.name : ROLE_ID}`);
 
     const me = await guild.members.fetchMe();
-    const canManageRoles = me.permissions.has(PermissionsBitField.Flags.ManageRoles);
-    if (!canManageRoles) console.warn('⚠️ Bot hat kein Manage Roles-Recht!');
-  } catch (e) {
-    console.error('❌ Konnte Guild/Rolle nicht prüfen:', e.message);
-  }
+    if (!me.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+      console.warn('⚠️ Bot hat kein Manage Roles-Recht!');
+    }
+  } catch (e) { console.error('❌ Konnte Guild/Rolle nicht prüfen:', e.message); }
 });
 
 // ====== Text-Commands ======
-client.on(Events.MessageCreate, async (msg) => {
+client.on(Events.MessageCreate, async msg => {
   if (msg.author.bot || !msg.guild || msg.guild.id !== GUILD_ID) return;
 
   const content = msg.content.trim();
+
   if (content.startsWith('!verify ')) {
     const tikTokName = content.split(/\s+/)[1];
     if (!tikTokName) return msg.reply('Usage: `!verify <TikTokName>`');
@@ -100,22 +90,18 @@ client.on(Events.MessageCreate, async (msg) => {
     saveLinks(links);
     msg.reply(`✅ Verknüpft: **${tikTokName}** ↔ <@${msg.author.id}>`);
 
-    // ---- Retroaktiv: Rolle direkt vergeben, falls Timer existiert ----
+    // Retroaktiv Rolle vergeben, falls Timer existiert
     if (roleTimers[tikTokName]) {
       try {
         await grantRoleByDiscordId(msg.author.id, 'Retroaktiv: Teamherz bereits gesendet');
-        msg.reply(`🎉 Rolle retroaktiv vergeben, da bereits ein Teamherz gesendet wurde.`);
-      } catch (e) {
-        console.error('Retroaktiv Rolle vergeben Fehler:', e.message);
-      }
+        msg.reply('🎉 Rolle retroaktiv vergeben, da bereits ein Teamherz gesendet wurde.');
+      } catch (e) { console.error('Retroaktiv Rolle vergeben Fehler:', e.message); }
     }
-    // ----------------------------------------------------------
-    
     return;
   }
 
   if (content === '!unlink') {
-    const entry = Object.entries(links).find(([, discordId]) => discordId === msg.author.id);
+    const entry = Object.entries(links).find(([, id]) => id === msg.author.id);
     if (!entry) return msg.reply('Du hast aktuell keinen gespeicherten TikTok‑Namen.');
     const [tikName] = entry;
     delete links[tikName];
@@ -124,7 +110,7 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 
   if (content === '!whoami') {
-    const entry = Object.entries(links).find(([, discordId]) => discordId === msg.author.id);
+    const entry = Object.entries(links).find(([, id]) => id === msg.author.id);
     if (!entry) return msg.reply('Kein TikTok‑Name gespeichert. Nutze `!verify <TikTokName>`.');
     const [tikName] = entry;
     return msg.reply(`Du bist verknüpft als **${tikName}**.`);
@@ -138,9 +124,7 @@ async function grantRoleByDiscordId(discordUserId, reason) {
     const member = await guild.members.fetch(discordUserId);
     await member.roles.add(ROLE_ID, reason);
     console.log(`🎉 Rolle an ${member.user.tag} vergeben (${reason})`);
-  } catch (e) {
-    console.error(`❌ Konnte Rolle nicht vergeben an ${discordUserId}:`, e.message);
-  }
+  } catch (e) { console.error(`❌ Konnte Rolle nicht vergeben an ${discordUserId}:`, e.message); }
 }
 
 // ====== Rollen Ablauf prüfen ======
@@ -157,23 +141,20 @@ async function checkExpiredRoles() {
         const guild = await client.guilds.fetch(GUILD_ID);
         const member = await guild.members.fetch(discordId);
         await member.roles.remove(ROLE_ID, '7 Tage kein Teamherz gesendet');
-        console.log(`🗑️ Rolle entfernt von ${member.user.tag} (7 Tage kein Gift)`);
+        console.log(`🗑️ Rolle entfernt von ${member.user.tag}`);
         delete roleTimers[tikTokUser];
         saveRoleTimers(roleTimers);
-      } catch (e) {
-        console.error(`❌ Konnte Rolle nicht entfernen von ${discordId}:`, e.message);
-      }
+      } catch (e) { console.error(`❌ Konnte Rolle nicht entfernen von ${discordId}:`, e.message); }
     }
   }
 }
 
-// Periodisch jede Stunde prüfen
-setInterval(checkExpiredRoles, 60 * 60 * 1000);
+setInterval(checkExpiredRoles, 60 * 60 * 1000); // jede Stunde prüfen
 
 // ====== TikTok Live Connection ======
 const tiktok = new WebcastPushConnection(TIKTOK_USERNAME);
 
-tiktok.on('gift', async (data) => {
+tiktok.on('gift', async data => {
   try {
     const giftName = (data.giftName || '').toLowerCase();
     if (data.repeatEnd && GIFT_NAMES.includes(giftName)) {
@@ -181,44 +162,34 @@ tiktok.on('gift', async (data) => {
       console.log(`💝 ${tikUser} hat Gift gesendet: ${data.giftName}`);
 
       const discordId = links[tikUser];
-      if (!discordId) {
-        console.log(`⚠️ Kein Link für TikTok‑User ${tikUser}.`);
-        return;
-      }
+      if (!discordId) return console.log(`⚠️ Kein Link für TikTok‑User ${tikUser}.`);
 
-      // Rolle vergeben und Timer setzen
       await grantRoleByDiscordId(discordId, `Gift: ${data.giftName}`);
       roleTimers[tikUser] = Date.now();
       saveRoleTimers(roleTimers);
     }
-  } catch (e) {
-    console.error('gift handler error:', e.message);
-  }
+  } catch (e) { console.error('gift handler error:', e.message); }
 });
 
-tiktok.on('subscribe', async (data) => {
+tiktok.on('subscribe', async data => {
   try {
     const tikUser = data.uniqueId;
     console.log(`⭐ Mitglied/Subscriber erkannt: ${tikUser}`);
 
     const discordId = links[tikUser];
-    if (!discordId) {
-      console.log(`⚠️ Kein Link für TikTok‑User ${tikUser}.`);
-      return;
-    }
+    if (!discordId) return console.log(`⚠️ Kein Link für TikTok‑User ${tikUser}.`);
+
     await grantRoleByDiscordId(discordId, 'TikTok Mitglied');
-  } catch (e) {
-    console.error('subscribe handler error:', e.message);
-  }
+  } catch (e) { console.error('subscribe handler error:', e.message); }
 });
 
-// TikTok verbinden
 tiktok.connect()
-  .then(state => console.log(`📡 Verbunden mit TikTok Live von @${TIKTOK_USERNAME}`))
+  .then(() => console.log(`📡 Verbunden mit TikTok Live von @${TIKTOK_USERNAME}`))
   .catch(err => console.error('❌ TikTok Connect Fehler:', err.message));
 
-// Discord Login
+// ====== Discord Login ======
 client.login(DISCORD_TOKEN).catch(e => {
   console.error('❌ Discord Login Fehler:', e.message);
   process.exit(1);
 });
+
